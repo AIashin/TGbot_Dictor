@@ -1,8 +1,5 @@
 #!/usr/bin/env python
 # coding: utf-8
-# -*- coding: utf-8 -*-
-# In[12]:
-
 
 import os
 import io
@@ -13,33 +10,34 @@ import logging
 import requests
 from collections import deque, OrderedDict
 from dotenv import load_dotenv
+
 load_dotenv()
 
-
-# ==== НАСТРОЙКИ =========
+# ==== Конфигурация =========
 
 TG_TOKEN   = os.getenv("BOT_TOKEN", "").strip()
 YC_API_KEY = os.getenv("YC_API_KEY", "").strip()
 TTS_URL    = os.getenv("TTS_URL", "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis").strip()
 TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}"
+DONATE_URL = os.getenv("DONATE_URL", "").strip()
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "").strip()  # не нужен для Stars (XTR)
+DONATE_TITLE = os.getenv("DONATE_TITLE", "Поддержать проект")
+DONATE_DESCRIPTION = os.getenv("DONATE_DESCRIPTION", "Спасибо за поддержку!")
 
 DEFAULT_VOICE = os.getenv("VOICE", "marina")
 DEFAULT_SPEED = os.getenv("SPEED", "1.0")
 MAX_LEN       = int(os.getenv("MAX_LEN", "1000"))
 
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("tts-bot")
 log.setLevel(logging.INFO)
 
-
 if not TG_TOKEN:
-    raise RuntimeError("BOT_TOKEN пуст — положи его в .env")
+    raise RuntimeError("Переменная BOT_TOKEN не задана. Укажите её в файле .env (BOT_TOKEN=...).")
 if not YC_API_KEY:
-    raise RuntimeError("YC_API_KEY пуст — положи его в .env")
+    raise RuntimeError("Переменная YC_API_KEY не задана. Укажите её в файле .env (YC_API_KEY=...).")
 
-
-# ============== Голоса (код -> имя на русском) ==============
+# ============== Подписи голосов (код -> русское имя) ==============
 VOICE_LABELS: "OrderedDict[str,str]" = OrderedDict([
     ("marina",    "Марина"),
     ("masha",     "Маша"),
@@ -55,7 +53,7 @@ VOICE_LABELS: "OrderedDict[str,str]" = OrderedDict([
     ("ermil",     "Ермил"),
     ("zahar",     "Захар"),
     ("madi_ru",   "Мади"),
-    ("madirus",   "Мади (legacy)"),
+    ("madirus",   "Мади (устар.)"),
     ("saule_ru",  "Сауле"),
     ("omazh",     "Омаж"),
     ("yulduz_ru", "Юлдуз"),
@@ -63,18 +61,18 @@ VOICE_LABELS: "OrderedDict[str,str]" = OrderedDict([
 
 # ============== Роли/эмоции ==============
 ROLE_LABELS = OrderedDict([
-    ("neutral",   "Нейтрально"),
-    ("good",      "Доброжелательно"),
-    ("evil",      "Зло/жёстко"),
-    ("cheerful",  "Весело"),
-    ("sad",       "Грустно"),
-    ("angry",     "Сердито"),
-    ("strict",    "Строго"),
+    ("neutral",  "нейтральный"),
+    ("good",     "добрый"),
+    ("evil",     "злой"),
+    ("cheerful", "весёлый"),
+    ("sad",      "грустный"),
+    ("angry",    "сердитый"),
+    ("strict",   "строгий"),
 ])
 
-# Поддержка ролей по голосам (если голоса нет — считаем, что поддерживает только neutral)
+# Поддержка ролей для голосов (если не указано, используется neutral)
 VOICE_ROLES = {
-    # мужские русские голоса
+    # мужские, поддерживают good/evil
     "ermil":     ["neutral", "good", "evil"],
     "zahar":     ["neutral", "good", "evil"],
     "filipp":    ["neutral", "good", "evil"],
@@ -89,7 +87,7 @@ VOICE_ROLES = {
     "dasha":     ["neutral", "cheerful", "sad"],
     "julia":     ["neutral", "cheerful", "sad"],
     "jane":      ["neutral", "cheerful", "sad"],
-    # тюркские/казахские — оставим только neutral (расширишь после тестов)
+    # национальные/узкоспециальные
     "madi_ru":   ["neutral"],
     "madirus":   ["neutral"],
     "saule_ru":  ["neutral"],
@@ -97,11 +95,10 @@ VOICE_ROLES = {
     "yulduz_ru": ["neutral"],
 }
 
-# ============== Форматы (контейнеры) ==============
-# SpeechKit v3 поддерживает WAV (LPCM), OGG_OPUS, MP3
+# ============== Аудиоформаты (поддержка) ==============
 ALLOWED_FORMATS = ["OGG_OPUS", "MP3", "WAV"]
 
-# ============== Память процесса ==============
+# ============== Состояние пользователя ==============
 user_prefs = {}   # chat_id -> {"voice":..., "speed":..., "format":..., "role":...}
 rate_state = {}   # chat_id -> deque[timestamps]
 
@@ -140,7 +137,7 @@ def allow_request(chat_id: int) -> bool:
 
 # ============== SpeechKit v3 (NDJSON) ==============
 def _collect_audio_chunks_from_obj(obj):
-    """Собрать все audioChunk.data из произвольной вложенности."""
+    """Ищет и собирает все поля audioChunk.data в произвольном JSON."""
     chunks = []
     if isinstance(obj, dict):
         ac = obj.get("audioChunk")
@@ -154,13 +151,11 @@ def _collect_audio_chunks_from_obj(obj):
     return chunks
 
 
-
 def synth_tts(text: str, voice: str, speed: str, out_format: str, role: str | None = None) -> bytes:
-    """Синтез речи в формате out_format (OGG_OPUS/MP3/WAV) через SpeechKit v3 NDJSON."""
+    """Синтезирует речь в формате out_format (OGG_OPUS/MP3/WAV) через SpeechKit v3 NDJSON."""
     if out_format not in ALLOWED_FORMATS:
-        raise ValueError(f"Формат {out_format} не поддержан. Доступно: {', '.join(ALLOWED_FORMATS)}")
+        raise ValueError(f"Формат {out_format} не поддерживается. Доступно: {', '.join(ALLOWED_FORMATS)}")
 
-    # алиас совместимости
     if voice == "madirus":
         voice = "madi_ru"
 
@@ -172,7 +167,6 @@ def synth_tts(text: str, voice: str, speed: str, out_format: str, role: str | No
         "text": text,
         "hints": hints,
         "outputAudioSpec": {"containerAudio": {"containerAudioType": out_format}},
-        # "unsafeMode": True,  # можно включить для очень длинных текстов
     }
 
     with requests.post(
@@ -206,16 +200,15 @@ def synth_tts(text: str, voice: str, speed: str, out_format: str, role: str | No
                 b64_parts.extend(chunks)
 
         if not b64_parts:
-            raise RuntimeError("SpeechKit v3: не пришли audioChunk — проверь ключ/голос/скорость/format/роль.")
+            raise RuntimeError("SpeechKit v3: нет данных audioChunk. Проверьте текст/параметры/формат.")
 
         return base64.b64decode("".join(b64_parts))
-
 
 
 # ============== Telegram helpers ==============
 def tg_send_text(chat_id: int, text: str, reply_markup: dict | None = None):
     url = f"{TG_API}/sendMessage"
-    data = {"chat_id": chat_id, "text": text}
+    data = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     r = requests.post(url, data=data, timeout=30)
@@ -282,9 +275,9 @@ def kb_voice():
 
 def kb_format():
     label = {
-        "OGG_OPUS": "OGG/Opus (voice)",
-        "MP3": "MP3 (универсально)",
-        "WAV": "WAV/LPCM (большой)",
+        "OGG_OPUS": "OGG/Opus (голосовое сообщение)",
+        "MP3": "MP3 (аудиофайл)",
+        "WAV": "WAV/LPCM (без сжатия)",
     }
     rows = [[{"text": label[f], "callback_data": f"fmt:{f}"}] for f in ALLOWED_FORMATS]
     return {"inline_keyboard": rows}
@@ -301,18 +294,62 @@ def kb_role(voice_code: str):
     return {"inline_keyboard": rows}
 
 
-# ============== Команды ==============
+# ============== Подсказка ==============
 HELP_TEXT = (
-    "Я озвучиваю текст 🎙️\n\n"
+    "Я голосовой бот на Yandex SpeechKit.\n\n"
     "Команды:\n"
     "/start — приветствие\n"
-    "/help — помощь\n"
+    "/help — эта подсказка\n"
     "/voice — выбрать голос\n"
-    "/format — выбрать формат файла\n"
-    "/role — выбрать роль/эмоцию (если поддерживается)\n\n"
-    "Пришлите текст (до {maxlen} симв.) — верну аудио.\n"
-    "Сейчас: голос «{voice_ru}», скорость {speed}, формат {fmt}, роль {role_ru}."
+    "/format — выбрать формат аудио\n"
+    "/donate — поддержать проект\n\n"
+    "Отправьте текст (до {maxlen} символов), и я его озвучу.\n"
+    "Сейчас: голос «{voice_ru}», скорость {speed}, формат {fmt}."
 )
+
+def kb_donate():
+    if not DONATE_URL:
+        return None
+    return {
+        "inline_keyboard": [[
+            {"text": "Поддержать проект", "url": DONATE_URL}
+        ]]
+    }
+
+def kb_donate_stars():
+    # Меню с фиксированными пакетами звёзд
+    rows = [[
+        {"text": "5⭐",  "callback_data": "donate:5"},
+        {"text": "10⭐", "callback_data": "donate:10"},
+        {"text": "20⭐", "callback_data": "donate:20"},
+    ]]
+    return {"inline_keyboard": rows}
+
+def send_stars_invoice(chat_id: int, stars: int):
+    """Отправляет счёт в звёздах (Telegram Stars). Требует включённых Stars для бота.
+    Валюта 'XTR' используется для звёзд. Провайдер-токен обычно не требуется.
+    """
+    url = f"{TG_API}/sendInvoice"
+    title = DONATE_TITLE
+    description = DONATE_DESCRIPTION
+    payload = json.dumps({"type": "donate", "stars": stars, "ts": int(time.time())}, ensure_ascii=False)
+    currency = "XTR"  # Telegram Stars
+    # Для Stars сумма указывается в звёздах; Telegram принимает XTR без provider_token.
+    prices = json.dumps([{ "label": f"Донат {stars}⭐", "amount": stars }], ensure_ascii=False)
+    data = {
+        "chat_id": chat_id,
+        "title": title,
+        "description": description,
+        "payload": payload,
+        "currency": currency,
+        "prices": prices,
+    }
+    if PAYMENT_PROVIDER_TOKEN:
+        data["provider_token"] = PAYMENT_PROVIDER_TOKEN
+    r = requests.post(url, data=data, timeout=30)
+    if r.status_code != 200:
+        log.error("TG sendInvoice ERROR %s: %s", r.status_code, r.text[:500])
+        r.raise_for_status()
 
 def ensure_prefs(chat_id: int):
     return user_prefs.setdefault(chat_id, {
@@ -326,10 +363,10 @@ def handle_command(chat_id: int, text: str):
     low = text.lower().strip()
     prefs = ensure_prefs(chat_id)
     voice_ru = VOICE_LABELS.get(prefs["voice"], prefs["voice"])
-    role_ru  = ROLE_LABELS.get(prefs.get("role", "neutral"), "Нейтрально")
+    role_ru  = ROLE_LABELS.get("neutral", "нейтральный")
 
     if low in ("/start", "start"):
-        tg_send_text(chat_id, "Привет! Пришли текст — озвучу 🎧\nКоманды: /voice /format /role /help")
+        tg_send_text(chat_id, "Привет! Это бот озвучки текста на Yandex SpeechKit.\nКоманды: /voice /format /donate /help", reply_markup=kb_donate())
         return True
 
     if low in ("/help", "help"):
@@ -338,20 +375,19 @@ def handle_command(chat_id: int, text: str):
         return True
 
     if low.startswith("/voice"):
-        tg_send_text(chat_id, f"Выбери голос (текущий: {voice_ru}):", reply_markup=kb_voice())
+        tg_send_text(chat_id, f"Выберите голос (сейчас: {voice_ru}):", reply_markup=kb_voice())
         return True
 
     if low.startswith("/format"):
-        tg_send_text(chat_id, f"Выбери формат файла (текущий: {prefs['format']}):", reply_markup=kb_format())
+        tg_send_text(chat_id, f"Выберите формат аудио (сейчас: {prefs['format']}):", reply_markup=kb_format())
         return True
 
-    if low.startswith("/role"):
-        voice_code = prefs["voice"]
-        tg_send_text(
-            chat_id,
-            f"Выбери роль/эмоцию для «{VOICE_LABELS.get(voice_code, voice_code)}» (текущая: {role_ru}):",
-            reply_markup=kb_role(voice_code)
-        )
+    if low.startswith("/donate"):
+        if DONATE_URL:
+            tg_send_text(chat_id, "Спасибо за поддержку!", reply_markup=kb_donate())
+        else:
+            # Покажем меню доната звёздами
+            tg_send_text(chat_id, "Выберите сумму доната звёздами:", reply_markup=kb_donate_stars())
         return True
 
     return False
@@ -365,7 +401,7 @@ def handle_callback(cb: dict):
     data = cb.get("data", "")
 
     if not chat_id or not message_id or not data:
-        tg_answer_callback(cb_id, "Некорректный callback"); return
+        tg_answer_callback(cb_id, "Некорректные данные callback"); return
 
     prefs = ensure_prefs(chat_id)
 
@@ -381,27 +417,31 @@ def handle_callback(cb: dict):
     if data.startswith("fmt:"):
         f = data.split(":", 1)[1]
         if f not in ALLOWED_FORMATS:
-            tg_answer_callback(cb_id, "Формат недоступен"); return
+            tg_answer_callback(cb_id, "Неподдерживаемый формат"); return
         prefs["format"] = f
         tg_answer_callback(cb_id, f"Формат: {f}")
         tg_edit_message_text(chat_id, message_id, f"Формат выбран: {f}")
         return
 
     if data.startswith("role:"):
-        role = data.split(":", 1)[1]
-        voice_code = prefs.get("voice", DEFAULT_VOICE)
-        allowed = VOICE_ROLES.get(voice_code, ["neutral"])
-        if role not in allowed:
-            tg_answer_callback(cb_id, "Эта роль не поддерживается выбранным голосом"); return
-        prefs["role"] = role
-        tg_answer_callback(cb_id, f"Роль: {ROLE_LABELS.get(role, role)}")
-        tg_edit_message_text(chat_id, message_id, f"Роль выбрана: {ROLE_LABELS.get(role, role)}")
+        tg_answer_callback(cb_id, "Роли временно недоступны")
+        return
+
+    if data.startswith("donate:"):
+        amount_str = data.split(":", 1)[1]
+        try:
+            amount = int(amount_str)
+            send_stars_invoice(chat_id, amount)
+            tg_answer_callback(cb_id, f"Счёт на {amount}⭐")
+        except Exception as e:
+            log.exception("donate stars error: %r", e)
+            tg_answer_callback(cb_id, "Не удалось сформировать счёт")
         return
 
     tg_answer_callback(cb_id, "Ок")
 
 
-# ============== Основной цикл ==============
+# ============== Главный цикл ==============
 def main():
     # sanity + очистка webhook
     try:
@@ -412,11 +452,11 @@ def main():
     try:
         clear = requests.get(f"{TG_API}/setWebhook", params={"url": ""}, timeout=15).json()
         log.info("Webhook clear: %s", clear)
-    except Exception as e:
+    except Exception as e: 
         log.warning("setWebhook clear error: %r", e)
 
-    print("✅ Бот запущен локально. Открой чат с ботом и пришли текст.")
-    print("Если тишина — убедись, что webhook отключён: setWebhook?url=")
+    print("Режим: long polling активен. Пишите текст — я озвучу ответом.")
+    print("Для работы через webhook укажите URL: setWebhook?url=")
 
     offset = None
     while True:
@@ -451,23 +491,24 @@ def main():
                             continue
                     except Exception as e:
                         log.exception("handle_command error: %r", e)
-                        tg_send_text(chat_id, "Что-то пошло не так с командой. Попробуйте ещё раз.")
+                        tg_send_text(chat_id, "Ошибка обработки команды. Попробуйте ещё раз позже.")
                         continue
 
                 # rate limit
                 if not allow_request(chat_id):
-                    tg_send_text(chat_id, "Слишком часто. Пожалуйста, подождите немного ⏳")
+                    tg_send_text(chat_id, "Слишком много запросов. Пожалуйста, подождите немного и повторите.")
                     continue
 
-                # ограничение длины
+                # подготовка запроса
                 sample = text[:MAX_LEN]
                 prefs = ensure_prefs(chat_id)
                 voice  = prefs["voice"]
                 speed  = prefs["speed"]
                 outfmt = prefs["format"]
-                role   = prefs.get("role", "neutral")
+                # принудительно используем только нейтральную роль, чтобы избежать ошибок
+                role   = "neutral"
 
-                # кэш
+                # кеш
                 cache_key = (sample, voice, speed, outfmt, role)
                 audio = cache.get(cache_key)
 
@@ -477,39 +518,39 @@ def main():
                         cache.set(cache_key, audio)
                     except requests.exceptions.ReadTimeout:
                         log.warning("SpeechKit timeout")
-                        tg_send_text(chat_id, "⚠️ SpeechKit не ответил вовремя. Попробуйте ещё раз.")
+                        tg_send_text(chat_id, "Таймаут SpeechKit. Попробуйте ещё раз чуть позже.")
                         continue
                     except Exception as e:
                         log.exception("TTS error: %r", e)
-                        tg_send_text(chat_id, "⚠️ Не удалось озвучить. Попробуйте короче или позже.")
+                        tg_send_text(chat_id, "Ошибка synth TTS. Проверьте текст/настройки и попробуйте снова.")
                         continue
 
-                # лимит размера
+                # ограничение на размер файла
                 if len(audio) > 18_000_000:
-                    tg_send_text(chat_id, "Аудио получилось слишком большим (>18 МБ). Укоротите текст, пожалуйста.")
+                    tg_send_text(chat_id, "Файл аудио слишком большой (>18 МБ). Укоротите текст и попробуйте снова.")
                     continue
 
-                # отправка в зависимости от формата
+                # отправка аудио/голоса
                 try:
                     voice_ru = VOICE_LABELS.get(voice, voice)
                     role_ru  = ROLE_LABELS.get(role, role)
                     if outfmt == "OGG_OPUS":
-                        tg_send_voice(chat_id, audio, caption=f"TTS v3 · {voice_ru} · {role_ru} · OGG/Opus")
+                        tg_send_voice(chat_id, audio, caption=f"TTS v3 — {voice_ru} — {role_ru} — OGG/Opus")
                     elif outfmt == "MP3":
                         tg_send_audio(chat_id, audio, "speech.mp3", "audio/mpeg",
-                                      caption=f"TTS v3 · {voice_ru} · {role_ru} · MP3")
+                                      caption=f"TTS v3 — {voice_ru} — {role_ru} — MP3")
                     elif outfmt == "WAV":
                         tg_send_audio(chat_id, audio, "speech.wav", "audio/wav",
-                                      caption=f"TTS v3 · {voice_ru} · {role_ru} · WAV")
+                                      caption=f"TTS v3 — {voice_ru} — {role_ru} — WAV")
                     else:
                         tg_send_audio(chat_id, audio, "speech.bin", "application/octet-stream",
-                                      caption=f"TTS v3 · {voice_ru} · {role_ru} · {outfmt}")
+                                      caption=f"TTS v3 — {voice_ru} — {role_ru} — {outfmt}")
                 except Exception as e:
                     log.exception("send audio error: %r", e)
-                    tg_send_text(chat_id, "Не удалось отправить аудио в Telegram.")
+                    tg_send_text(chat_id, "Ошибка при отправке аудио в Telegram.")
 
         except KeyboardInterrupt:
-            print("\n⏹️ Остановка по Ctrl+C")
+            print("\nВыход по Ctrl+C")
             break
         except requests.exceptions.ReadTimeout:
             continue
@@ -519,7 +560,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
