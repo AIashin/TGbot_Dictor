@@ -2,3 +2,21 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Local data and logs
+bot.db
+metrics.json
+stats*.json
+stats.csv
+bot_summary.json
+telegram_errors.log
+bot.backup.txt
+*.log
+
+# Binaries and caches
+ffmpeg.zip
+ffmpeg_extracted/
+
+# IDE/editor
+.vscode/
+.idea/
