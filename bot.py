@@ -1393,7 +1393,7 @@ def kb_main():
     if DONATE_URL:
         rows.append([{ "text": "Поддержать", "url": DONATE_URL }])
     else:
-        rows.append([{ "text": "Поддержать (Stars)", "callback_data": "menu:donate" }])
+        rows.append([{ "text": "Поддержать", "callback_data": "menu:donate" }])
     return {"inline_keyboard": rows}
 
 
@@ -1595,7 +1595,7 @@ def handle_command(chat_id: int, text: str):
         if DONATE_URL:
             tg_send_text(chat_id, "Спасибо за поддержку!", reply_markup=kb_donate())
         else:
-            tg_send_text(chat_id, "Поддержать проект (Stars):", reply_markup=kb_donate_stars())
+            tg_send_text(chat_id, "Поддержать проект:", reply_markup=kb_donate_stars())
         return True
 
     if low.startswith("/export_stats"):
@@ -1672,7 +1672,7 @@ def handle_callback(cb: dict):
             if DONATE_URL:
                 tg_edit_message_text(chat_id, message_id, "Поддержать проект:", reply_markup=kb_donate())
             else:
-                tg_edit_message_text(chat_id, message_id, "Поддержать проект (Stars):", reply_markup=kb_donate_stars())
+                tg_edit_message_text(chat_id, message_id, "Поддержать проект:", reply_markup=kb_donate_stars())
             tg_answer_callback(cb_id)
             return
 
